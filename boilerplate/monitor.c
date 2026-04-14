@@ -25,7 +25,7 @@
 #include <linux/timer.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
-#include <linux/timer.h>
+#include <linux/jiffies.h>
 
 #include "monitor_ioctl.h"
 

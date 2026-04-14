@@ -33,12 +33,7 @@
 #define CHECK_INTERVAL_SEC 1
 
 /* ==============================================================
- * TODO 1: Define your linked-list node struct.
- *
- * Requirements:
- *   - track PID, container ID, soft limit, and hard limit
- *   - remember whether the soft-limit warning was already emitted
- *   - include `struct list_head` linkage
+ * TODO 1
  * ============================================================== */
 struct monitor_entry {
     pid_t pid;
@@ -50,27 +45,18 @@ struct monitor_entry {
 };
 
 /* ==============================================================
- * TODO 2: Declare the global monitored list and a lock.
- *
- * Requirements:
- *   - shared across ioctl and timer code paths
- *   - protect insert, remove, and iteration safely
- *
- * You may choose either a mutex or a spinlock, but your README must
- * justify the choice in terms of the code paths you implemented.
+ * TODO 2
  * ============================================================== */
 static LIST_HEAD(monitor_list);
 static DEFINE_MUTEX(monitor_lock);
 
-/* --- Provided: internal device / timer state --- */
+/* --- Provided --- */
 static struct timer_list monitor_timer;
 static dev_t dev_num;
 static struct cdev c_dev;
 static struct class *cl;
 
-/* ---------------------------------------------------------------
- * Provided: RSS Helper
- * --------------------------------------------------------------- */
+/* --------------------------------------------------------------- */
 static long get_rss_bytes(pid_t pid)
 {
     struct task_struct *task;
@@ -182,6 +168,7 @@ static long monitor_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
             return -ENOMEM;
 
         entry->pid = req.pid;
+
         strncpy(entry->container_id, req.container_id,
                 sizeof(entry->container_id) - 1);
         entry->container_id[sizeof(entry->container_id) - 1] = '\0';
@@ -234,10 +221,24 @@ static int __init monitor_init(void)
     cl = class_create(THIS_MODULE, DEVICE_NAME);
 #endif
 
-    device_create(cl, NULL, dev_num, NULL, DEVICE_NAME);
+    if (IS_ERR(cl)) {
+        unregister_chrdev_region(dev_num, 1);
+        return PTR_ERR(cl);
+    }
+
+    if (IS_ERR(device_create(cl, NULL, dev_num, NULL, DEVICE_NAME))) {
+        class_destroy(cl);
+        unregister_chrdev_region(dev_num, 1);
+        return -1;
+    }
 
     cdev_init(&c_dev, &fops);
-    cdev_add(&c_dev, dev_num, 1);
+    if (cdev_add(&c_dev, dev_num, 1) < 0) {
+        device_destroy(cl, dev_num);
+        class_destroy(cl);
+        unregister_chrdev_region(dev_num, 1);
+        return -1;
+    }
 
     timer_setup(&monitor_timer, timer_callback, 0);
     mod_timer(&monitor_timer, jiffies + CHECK_INTERVAL_SEC * HZ);
@@ -251,7 +252,8 @@ static void __exit monitor_exit(void)
 {
     struct monitor_entry *entry, *tmp;
 
-    timer_shutdown_sync(&monitor_timer);   // ✅ FIXED (works on your kernel)
+    /* SAFEST cross-kernel approach */
+    del_timer_sync(&monitor_timer);
 
     mutex_lock(&monitor_lock);
 
@@ -272,3 +274,6 @@ static void __exit monitor_exit(void)
 
 module_init(monitor_init);
 module_exit(monitor_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Supervised multi-container memory monitor");

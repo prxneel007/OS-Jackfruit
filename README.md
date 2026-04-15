@@ -1,111 +1,275 @@
-# Multi-Container Runtime
+# 🧠 Multi-Container Runtime with Kernel Memory Monitor
 
-A lightweight Linux container runtime in C with a long-running supervisor and a kernel-space memory monitor.
+## 👥 Team Information
 
-Read [`project-guide.md`](project-guide.md) for the full project specification.
+| Name                      | SRN           |
+| ------------------------- | ------------- |
+| **Chirra Yuktha Praneel** | PES2UG24AM049 |
+| **Archita**               | PES2UG24AM024 |
 
 ---
 
-## Getting Started
+## 📌 Overview
 
-### 1. Fork the Repository
+This project implements a **lightweight container runtime** with:
 
-1. Go to [github.com/shivangjhalani/OS-Jackfruit](https://github.com/shivangjhalani/OS-Jackfruit)
-2. Click **Fork** (top-right)
-3. Clone your fork:
+* Process isolation using Linux namespaces
+* A supervisor for lifecycle management
+* Logging and IPC mechanisms
+* A **Linux Kernel Module** for memory monitoring with soft and hard limits
 
-```bash
-git clone https://github.com/<your-username>/OS-Jackfruit.git
-cd OS-Jackfruit
+---
+
+## 🏗️ System Architecture
+
+```
++------------------------------+
+|        User Commands         |
+| (engine start / logs / ps)   |
++--------------+---------------+
+               |
+               v
++------------------------------+
+|        Supervisor            |
+|  - Manages containers        |
+|  - Handles IPC (UNIX socket) |
+|  - Tracks metadata           |
++--------------+---------------+
+               |
+               v
++------------------------------+
+|        Containers            |
+|  (clone + namespaces)        |
+|  - PID Namespace             |
+|  - Mount Namespace           |
+|  - UTS Namespace             |
+|  - chroot FS                 |
++--------------+---------------+
+               |
+               v
++------------------------------+
+|    Kernel Module (monitor)   |
+|  - Tracks RSS usage          |
+|  - Soft limit → warning      |
+|  - Hard limit → SIGKILL      |
++------------------------------+
 ```
 
-### 2. Set Up Your VM
+---
 
-You need an **Ubuntu 22.04 or 24.04** VM with **Secure Boot OFF**. WSL will not work.
+## 🔄 Execution Flow (Clone → Monitor → Kill)
 
-Install dependencies:
-
-```bash
-sudo apt update
-sudo apt install -y build-essential linux-headers-$(uname -r)
+```
+[ User runs engine start ]
+            |
+            v
+[ Supervisor creates container ]
+            |
+            v
+[ clone() with namespaces ]
+            |
+            v
+[ Process starts (memory_hog / cpu_hog / io_pulse) ]
+            |
+            v
+[ Kernel Timer triggers every 1s ]
+            |
+            v
+[ monitor.c checks RSS ]
+            |
+     +------+------+
+     |             |
+     v             v
+[ RSS > Soft ]   [ RSS > Hard ]
+     |             |
+     v             v
+ Log warning     Send SIGKILL
+                     |
+                     v
+              Remove from list
 ```
 
-### 3. Run the Environment Check
+---
 
-```bash
-cd boilerplate
-chmod +x environment-check.sh
-sudo ./environment-check.sh
+## ⚙️ Build and Setup
+
+### Compile everything
+
 ```
-
-Fix any issues reported before moving on.
-
-### 4. Prepare the Root Filesystem
-
-```bash
-mkdir rootfs-base
-wget https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-minirootfs-3.20.3-x86_64.tar.gz
-tar -xzf alpine-minirootfs-3.20.3-x86_64.tar.gz -C rootfs-base
-
-# Make one writable copy per container you plan to run
-cp -a ./rootfs-base ./rootfs-alpha
-cp -a ./rootfs-base ./rootfs-beta
-```
-
-Do not commit `rootfs-base/` or `rootfs-*` directories to your repository.
-
-### 5. Understand the Boilerplate
-
-The `boilerplate/` folder contains starter files:
-
-| File                   | Purpose                                             |
-| ---------------------- | --------------------------------------------------- |
-| `engine.c`             | User-space runtime and supervisor skeleton          |
-| `monitor.c`            | Kernel module skeleton                              |
-| `monitor_ioctl.h`      | Shared ioctl command definitions                    |
-| `Makefile`             | Build targets for both user-space and kernel module |
-| `cpu_hog.c`            | CPU-bound test workload                             |
-| `io_pulse.c`           | I/O-bound test workload                             |
-| `memory_hog.c`         | Memory-consuming test workload                      |
-| `environment-check.sh` | VM environment preflight check                      |
-
-Use these as your starting point. You are free to restructure the repository however you want — the submission requirements are listed in the project guide.
-
-### 6. Build and Verify
-
-```bash
-cd boilerplate
 make
 ```
 
-If this compiles without errors, your environment is ready.
+### Load kernel module
 
-### 7. GitHub Actions Smoke Check
-
-Your fork will inherit a minimal GitHub Actions workflow from this repository.
-
-That workflow only performs CI-safe checks:
-
-- `make -C boilerplate ci`
-- user-space binary compilation (`engine`, `memory_hog`, `cpu_hog`, `io_pulse`)
-- `./boilerplate/engine` with no arguments must print usage and exit with a non-zero status
-
-The CI-safe build command is:
-
-```bash
-make -C boilerplate ci
 ```
-
-This smoke check does not test kernel-module loading, supervisor runtime behavior, or container execution.
+sudo insmod monitor.ko
+```
 
 ---
 
-## What to Do Next
+## 🧪 Experiments & Results
 
-Read [`project-guide.md`](project-guide.md) end to end. It contains:
+### 🔹 1. Memory Limit Enforcement
 
-- The six implementation tasks (multi-container runtime, CLI, logging, kernel monitor, scheduling experiments, cleanup)
-- The engineering analysis you must write
-- The exact submission requirements, including what your `README.md` must contain (screenshots, analysis, design decisions)
+```
+sudo ./engine start gamma ./rootfs-alpha /memory_hog --soft-mib 20 --hard-mib 40
+```
 
-Your fork's `README.md` should be replaced with your own project documentation as described in the submission package section of the project guide. (As in get rid of all the above content and replace with your README.md)
+**Observed:**
+
+* Soft limit triggered (~20MB)
+* Hard limit triggered (~40MB)
+* Process killed successfully
+
+---
+
+### 🔹 2. Kernel Logs
+
+```
+sudo dmesg | tail -n 20
+```
+
+**Observed:**
+
+* Module loaded
+* Soft limit warning printed
+* Hard limit kill executed
+
+---
+
+### 🔹 3. Container Status
+
+```
+sudo ./engine ps
+```
+
+**Observed:**
+
+* gamma → `hard_limit_killed`
+* beta → `exited`
+* alpha → `running`
+
+---
+
+### 🔹 4. Memory Growth Behavior
+
+```
+sudo ./engine logs alpha
+```
+
+**Observed:**
+
+* Memory increases in chunks (8MB)
+* Confirms controlled allocation
+
+---
+
+### 🔹 5. CPU vs I/O Scheduling
+
+```
+sudo ./engine start cpu1 ./rootfs-alpha /cpu_hog --nice 10
+sudo ./engine start io1 ./rootfs-beta /io_pulse --nice -10
+```
+
+```
+sudo ./engine logs cpu1
+sudo ./engine logs io1
+```
+
+**Observed:**
+
+* CPU-bound task runs continuously
+* IO-bound task executes intermittently
+* Lower nice value → higher priority
+
+---
+
+### 🔹 6. Zombie Process Check
+
+```
+ps aux | grep defunct
+```
+
+**Observed:**
+
+* No zombie processes ✅
+
+---
+
+## 🧠 Design Details
+
+### 🔸 Isolation Mechanisms
+
+* **PID namespace** → process isolation
+* **Mount namespace** → filesystem isolation
+* **UTS namespace** → hostname isolation
+* **chroot** → container filesystem
+
+---
+
+### 🔸 Supervisor Design
+
+* Uses `clone()` for container creation
+* Tracks containers via metadata
+* Handles termination via signals
+
+---
+
+### 🔸 IPC & Logging
+
+* UNIX domain socket → communication
+* Pipes → log streaming
+* Bounded buffer → prevents overflow
+* Mutex + condition variables → synchronization
+
+---
+
+### 🔸 Kernel Module Logic
+
+* Periodic timer (`1 sec`)
+* Fetch RSS using `get_mm_rss()`
+* Compare against limits:
+
+  * Soft → log warning
+  * Hard → kill process + remove entry
+
+---
+
+## ⚖️ Design Decisions
+
+| Component  | Choice              | Reason           |
+| ---------- | ------------------- | ---------------- |
+| Isolation  | chroot + namespaces | Lightweight      |
+| Monitoring | Timer-based         | Efficient        |
+| IPC        | UNIX socket         | Fast             |
+| Logging    | Bounded buffer      | Prevent overflow |
+
+---
+
+## 📊 Results Summary
+
+| Feature            | Status |
+| ------------------ | ------ |
+| Container creation | ✅      |
+| Logging system     | ✅      |
+| Memory monitoring  | ✅      |
+| Soft limit         | ✅      |
+| Hard limit         | ✅      |
+| Scheduler behavior | ✅      |
+| Zombie handling    | ✅      |
+
+---
+
+## 🚀 Conclusion
+
+This project successfully demonstrates:
+
+* A fully functional container runtime
+* Kernel-level memory monitoring
+* Process scheduling differences
+* Robust IPC and logging system
+
+All required objectives were implemented and validated.
+
+---
+

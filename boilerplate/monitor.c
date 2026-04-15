@@ -33,11 +33,16 @@
 #define CHECK_INTERVAL_SEC 1
 
 /* ==============================================================
- * TODO 1
+ * TODO 1: Define your linked-list node struct.
+ *
+ * Requirements:
+ *   - track PID, container ID, soft limit, and hard limit
+ *   - remember whether the soft-limit warning was already emitted
+ *   - include `struct list_head` linkage
  * ============================================================== */
 struct monitor_entry {
     pid_t pid;
-    char container_id[32];
+    char container_id[MONITOR_NAME_LEN];
     unsigned long soft_limit;
     unsigned long hard_limit;
     int soft_triggered;
@@ -45,18 +50,30 @@ struct monitor_entry {
 };
 
 /* ==============================================================
- * TODO 2
+ * TODO 2: Declare the global monitored list and a lock.
+ *
+ * Requirements:
+ *   - shared across ioctl and timer code paths
+ *   - protect insert, remove, and iteration safely
+ *
+ * You may choose either a mutex or a spinlock, but your README must
+ * justify the choice in terms of the code paths you implemented.
  * ============================================================== */
 static LIST_HEAD(monitor_list);
 static DEFINE_MUTEX(monitor_lock);
 
-/* --- Provided --- */
+/* --- Provided: internal device / timer state --- */
 static struct timer_list monitor_timer;
 static dev_t dev_num;
 static struct cdev c_dev;
 static struct class *cl;
 
-/* --------------------------------------------------------------- */
+/* ---------------------------------------------------------------
+ * Provided: RSS Helper
+ *
+ * Returns the Resident Set Size in bytes for the given PID,
+ * or -1 if the task no longer exists.
+ * --------------------------------------------------------------- */
 static long get_rss_bytes(pid_t pid)
 {
     struct task_struct *task;
@@ -82,7 +99,11 @@ static long get_rss_bytes(pid_t pid)
     return rss_pages * PAGE_SIZE;
 }
 
-/* --------------------------------------------------------------- */
+/* ---------------------------------------------------------------
+ * Provided: soft-limit helper
+ *
+ * Log a warning when a process exceeds the soft limit.
+ * --------------------------------------------------------------- */
 static void log_soft_limit_event(const char *container_id,
                                  pid_t pid,
                                  unsigned long limit_bytes,
@@ -93,7 +114,11 @@ static void log_soft_limit_event(const char *container_id,
            container_id, pid, rss_bytes, limit_bytes);
 }
 
-/* --------------------------------------------------------------- */
+/* ---------------------------------------------------------------
+ * Provided: hard-limit helper
+ *
+ * Kill a process when it exceeds the hard limit.
+ * --------------------------------------------------------------- */
 static void kill_process(const char *container_id,
                          pid_t pid,
                          unsigned long limit_bytes,
@@ -112,7 +137,9 @@ static void kill_process(const char *container_id,
            container_id, pid, rss_bytes, limit_bytes);
 }
 
-/* --------------------------------------------------------------- */
+/* ---------------------------------------------------------------
+ * Timer Callback - fires every CHECK_INTERVAL_SEC seconds.
+ * --------------------------------------------------------------- */
 static void timer_callback(struct timer_list *t)
 {
     struct monitor_entry *entry, *tmp;
@@ -147,7 +174,13 @@ static void timer_callback(struct timer_list *t)
     mod_timer(&monitor_timer, jiffies + CHECK_INTERVAL_SEC * HZ);
 }
 
-/* --------------------------------------------------------------- */
+/* ---------------------------------------------------------------
+ * IOCTL Handler
+ *
+ * Supported operations:
+ *   - register a PID with soft + hard limits
+ *   - unregister a PID when the runtime no longer needs tracking
+ * --------------------------------------------------------------- */
 static long monitor_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
     struct monitor_request req;
@@ -161,27 +194,44 @@ static long monitor_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         return -EFAULT;
 
     if (cmd == MONITOR_REGISTER) {
-        struct monitor_entry *entry;
+        struct monitor_entry *entry, *cur;
+        int ret = 0;
+
+        if (req.pid <= 0 ||
+            req.soft_limit_bytes == 0 ||
+            req.hard_limit_bytes == 0 ||
+            req.soft_limit_bytes >= req.hard_limit_bytes)
+            return -EINVAL;
 
         entry = kmalloc(sizeof(*entry), GFP_KERNEL);
         if (!entry)
             return -ENOMEM;
 
         entry->pid = req.pid;
-
-        strncpy(entry->container_id, req.container_id,
-                sizeof(entry->container_id) - 1);
-        entry->container_id[sizeof(entry->container_id) - 1] = '\0';
-
+        strscpy(entry->container_id, req.container_id,
+                sizeof(entry->container_id));
         entry->soft_limit = req.soft_limit_bytes;
         entry->hard_limit = req.hard_limit_bytes;
         entry->soft_triggered = 0;
 
         mutex_lock(&monitor_lock);
-        list_add(&entry->list, &monitor_list);
+
+        list_for_each_entry(cur, &monitor_list, list) {
+            if (cur->pid == req.pid) {
+                ret = -EEXIST;
+                break;
+            }
+        }
+
+        if (!ret)
+            list_add_tail(&entry->list, &monitor_list);
+
         mutex_unlock(&monitor_lock);
 
-        return 0;
+        if (ret)
+            kfree(entry);
+
+        return ret;
     }
 
     {
@@ -203,13 +253,13 @@ static long monitor_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
     }
 }
 
-/* --- Provided --- */
+/* --- Provided: file operations --- */
 static struct file_operations fops = {
     .owner = THIS_MODULE,
     .unlocked_ioctl = monitor_ioctl,
 };
 
-/* --- Provided --- */
+/* --- Provided: Module Init --- */
 static int __init monitor_init(void)
 {
     if (alloc_chrdev_region(&dev_num, 0, 1, DEVICE_NAME) < 0)
@@ -247,13 +297,16 @@ static int __init monitor_init(void)
     return 0;
 }
 
-/* --- Provided --- */
+/* --- Provided: Module Exit --- */
 static void __exit monitor_exit(void)
 {
     struct monitor_entry *entry, *tmp;
 
-    /* SAFEST cross-kernel approach */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+    timer_delete_sync(&monitor_timer);
+#else
     del_timer_sync(&monitor_timer);
+#endif
 
     mutex_lock(&monitor_lock);
 
